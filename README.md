@@ -39,34 +39,33 @@ The implementation directly models routines identified via RTTI and symbol table
 ## 2. Reversed Logic & Architectural Details
 
 ### 1. 841-Point PDAF Grid & 20-Byte Hardware DMA Record
-- Phase detection sites map onto a $29 \times 29$ grid ($841$ points total, parameter `zpd_max = 841`, index $0 \le a_3 \le 0x348$).
+- Phase detection sites map onto a **29 × 29 grid** (841 points total, parameter `zpd_max = 841`, index `0 <= a3 <= 0x348`).
 - Points arrive from the sensor ASIC DMA buffer in packed 20-byte records (`struct.unpack('<hhIiII')`):
   * `+0` (int16): Sensor X coordinate (binned right-shift `>>= 1` in `sub_2718A4`)
   * `+2` (int16): Sensor Y coordinate
   * `+4` (uint16): Status & error bitmask
-  * `+8` (int32): Signed phase disparity defocus ($\Delta d$)
+  * `+8` (int32): Signed phase disparity defocus (Δd in focus units)
   * `+12` (uint16): Correlation peak height
   * `+16` (uint16): Confidence normalizer
 - **Error Mask (`0x90CF`)**: Firmware `sub_271A90` rejects points where `(flags & 0x90CF) != 0`.
 - **Correlation Reliability Mask (`0x30`)**: Firmware `sub_6FC676` gates point reliability on bits 4 and 5 (`flags & 0x30 != 0`).
-- **Defocus Accumulation (`sub_6FC676`)**: Accumulates non-error point count (`num_no_err`) and absolute defocus sum (`sum_df_abs`) across all points passing `0x90CF`. For points additionally passing `0x30`, increments `num_reliable` and checks optical lock-on boundaries:
+- **Defocus Accumulation (`sub_6FC676`)**: Accumulates non-error point count (`num_no_err`) and absolute defocus sum (`sum_df_abs`) across all points passing `0x90CF`. For points additionally passing `0x30`, increments `num_reliable` and evaluates optical lock-on:
 
-  $$
-  \text{min\_optical\_bound} < \Delta d_i \le \text{max\_optical\_bound}
-  $$
+  ```text
+  min_optical_bound < defocus_error <= max_optical_bound
+  ```
 
 ### 2. Mario AFC 5×5 Debounce Matrix (`sub_8E5BF8` / `dword_C747C4`)
 - Continuous AF (`MarioAfcStateMachine`) uses a 5×5 debounce matrix measured in hardware clock ticks to prevent state chattering and hunting:
 
-  $$
-  \text{Matrix}_{5 \times 5} = \begin{bmatrix}
-  0 & 0 & 0 & 0 & 0 \\
-  0 & 0 & 400{,}000 & 10{,}000{,}000 & 0 \\
-  0 & 0 & 0 & 10{,}000{,}000 & 0 \\
-  0 & 0 & 0 & 0 & 0 \\
-  0 & 0 & 0 & 0 & 0
-  \end{bmatrix}
-  $$
+  ```text
+  Debounce Matrix (5×5 in clock ticks):
+  [ 0,  0,        0,          0,  0 ]   # Slot 0: STOP / WAIT
+  [ 0,  0,  400,000, 10,000,000,  0 ]   # Slot 1: LOCKED (-> Slot 2: 400k ticks, -> Slot 3: 10M ticks)
+  [ 0,  0,        0, 10,000,000,  0 ]   # Slot 2: TRACKING / MOVE_TO_PEAK (-> Slot 3: 10M ticks)
+  [ 0,  0,        0,          0,  0 ]   # Slot 3: SEARCH / APPROACH
+  [ 0,  0,        0,          0,  0 ]   # Slot 4: SCAN
+  ```
 
 - Transitions require target persistence: `current_tick - pending_target_tick >= matrix[curr_slot, next_slot]`.
 - Transitioning from `LOCKED` (Slot 1) to `TRACKING` (Slot 2) requires 400,000 clock ticks (~40 ms at 10 MHz), suppressing focus dropouts from momentary occlusions.
@@ -80,20 +79,28 @@ The implementation directly models routines identified via RTTI and symbol table
 - **Hysteresis Retention**: `PreFaceIsInLockOnRange` (`sub_271C00`) retains the active face target as long as it remains within optical defocus tolerance.
 
 ### 4. Scale-Adaptive Eye Spatial Gating (`sub_278858` & `sub_709FD6`)
-- Detected eyes are validated against an active tracking centroid $(t_x, t_y)$.
-- Scale is derived from inter-ocular distance $D_{\text{eye}} = \sqrt{\Delta x^2 + \Delta y^2}$ with $s = 2 \times D_{\text{eye}}$ (`sub_278778`).
-- Acceptance radius $R(s)$ is computed via piecewise linear interpolation:
+- Detected eyes are validated against an active tracking centroid `(tx, ty)`.
+- Scale is derived from inter-ocular distance:
 
-  $$
-  R(s) = \left\lfloor \frac{1}{16} \cdot \left( v_5 v_4 + (s - v_4) \frac{v_6 v_3 - v_5 v_4}{v_3 - v_4} \right) \right\rfloor
-  $$
+  ```text
+  D_eye = sqrt(Δx² + Δy²)
+  Scale s = 2 × D_eye   (sub_278778: v11 = 2 * v8)
+  ```
 
-  where $v_4 = 64$, $v_3 = 256$, $v_5 = 8$, $v_6 = 12$.
+- Acceptance radius `R(s)` is computed via piecewise linear interpolation:
+
+  ```text
+  R(s) = [ (v5 * v4) + (s - v4) * (v6 * v3 - v5 * v4) / (v3 - v4) ] >> 4
+  ```
+
+  where default firmware calibration constants are `v4 = 64`, `v3 = 256`, `v5 = 8`, `v6 = 12`:
+  * For `s <= 64`: `R(s) = (8 * s) >> 4 = s / 2`
+  * For `s >= 256`: `R(s) = (12 * s) >> 4 = 3s / 4`
 - Candidate eyes are rejected as outliers unless:
 
-  $$
-  (x_{\text{eye}} - t_x)^2 + (y_{\text{eye}} - t_y)^2 \le R(s)^2
-  $$
+  ```text
+  (x_eye - tx)² + (y_eye - ty)² <= R(s)²
+  ```
 
 ### 5. STAPLE Tracking & Hardware Boundaries (`sub_705BC6` & `sub_26E8D0`)
 - **Hardware Boundary**: In the physical camera, correlation filtering, feature extraction, and histogram updates run on dedicated hardware (Scene Analysis IP / FRC2 coprocessor via `ddl_saCalcStart` in `sub_26E8D0`).
@@ -101,15 +108,16 @@ The implementation directly models routines identified via RTTI and symbol table
 - **Reversed Firmware Logic**:
   * Q12 displacement coordinate integration:
 
-    $$
-    x \leftarrow x + \frac{dx \ll 12}{\text{scale}}
-    $$
+    ```text
+    new_x = x + (dx << 12) / scale
+    new_y = y + (dy << 12) / scale
+    ```
 
   * 20-pixel border check: target is flagged lost (`error_code = 3`) if any boundary violates the 20-pixel margin:
 
-    $$
-    x < 20 \quad\lor\quad y < 20 \quad\lor\quad x + w + 20 > W \quad\lor\quad y + h + 20 > H
-    $$
+    ```text
+    x < 20 or y < 20 or (x + w + 20) > W or (y + h + 20) > H
+    ```
 
 ### 6. Movie Contrast AF State Machine (`sub_8A5122` & `sub_8A520C`)
 - Dispatches dual-loop transitions between `CStateWob` (micro-wobble perturbation) and `CStateYama` (hill-climbing peak search).
