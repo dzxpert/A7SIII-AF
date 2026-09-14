@@ -19,19 +19,19 @@ The implementation directly models routines identified via RTTI and symbol table
 
 | Address | Binary Source File | Disassembly Behavior & Role | Implementation File |
 | :--- | :--- | :--- | :--- |
-| `sub_272420` | `priority_defocus_face_selector.cpp` | 8-slot ($8 \times 60$ B) iteration, reliability & density gating, min-defocus (`min_df`) selection | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
+| `sub_272420` | `priority_defocus_face_selector.cpp` | 8-slot (8 × 60 B) iteration, reliability & density gating, min-defocus (`min_df`) selection | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
 | `sub_271C00` | `defocus_face_selector.cpp` | Lock-on range retention hysteresis (`PreFaceIsInLockOnRange`) | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
 | `sub_271FA8` | `priority_queue.cpp` | Linked-list candidate priority rotation across 8 candidate face slots | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
-| `sub_278778` | `fc_alg_tracking_eye_selector.cpp` | Inter-ocular distance ($D_{\text{eye}}$), $2 \times D_{\text{eye}}$ scaling, nearer eye selection | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
-| `sub_278858` | `fc_alg_tracking_eye_selector.cpp` | 3-region piecewise linear spatial acceptance radius interpolation ($R \gg 4$) | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
-| `sub_709FD6` | `fc_alg_tracking_eye_selector.cpp` | Spatial acceptance gating: $(x_{\text{eye}} - t_x)^2 + (y_{\text{eye}} - t_y)^2 \le R^2$ | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
+| `sub_278778` | `fc_alg_tracking_eye_selector.cpp` | Inter-ocular distance (D_eye), 2 × D_eye scale, nearer eye selection | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
+| `sub_278858` | `fc_alg_tracking_eye_selector.cpp` | 3-region piecewise linear spatial radius interpolation (`R >> 4`) | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
+| `sub_709FD6` | `fc_alg_tracking_eye_selector.cpp` | Spatial acceptance gating: (dist_eye_to_tracking_center)² ≤ R² | [`eye_face_arbiter.py`](eye_face_arbiter.py) |
 | `sub_2718A4` | `defocus_info_translator.cpp` | 20-byte packed ZPD DMA record unpacking, coordinate right-shift (`>>= 1`) | [`pdaf.py`](pdaf.py) |
 | `sub_271A90` | `defocus_info_translator.cpp` | Invalid point error bitmask filtering (`(*v10 & 0x90CF) == 0`) | [`pdaf.py`](pdaf.py) |
 | `sub_6FC676` | `defocus_evaluator.cpp` | Metric accumulation, correlation reliability (`0x30`), optical windowing | [`pdaf.py`](pdaf.py) |
 | `sub_8E5BF8` | `mario_afc_state.cpp` | Continuous AF (Mario AFC) 5×5 hardware clock tick debounce matrix (`dword_C747C4`) | [`pdaf.py`](pdaf.py) |
 | `sub_8A5122` | `Camera::LC::MovieContrastAF` | Contrast AF wobble state dispatch (`CStateWob::Transition`) | [`contrast_af.py`](contrast_af.py) |
 | `sub_8A520C` | `Camera::LC::MovieContrastAF` | Contrast AF peak hill-climb state dispatch (`CStateYama::Transition`) | [`contrast_af.py`](contrast_af.py) |
-| `sub_705BC6` | `ddl_minna_staple_common.cpp` | Q12 fixed-point displacement integration $(dx \ll 12)/\text{scale}$, 20-pixel border check | [`staple_tracker.py`](staple_tracker.py) |
+| `sub_705BC6` | `ddl_minna_staple_common.cpp` | Q12 fixed-point displacement integration `(dx << 12) / scale`, 20px border check | [`staple_tracker.py`](staple_tracker.py) |
 | `sub_71E28A` | `ddl_minna_staple_common.cpp` | STAPLE dual-slot coordinator (Primary Slot 0, Secondary Slot 1) | [`staple_tracker.py`](staple_tracker.py) |
 
 ---
@@ -50,22 +50,29 @@ The implementation directly models routines identified via RTTI and symbol table
 - **Error Mask (`0x90CF`)**: Firmware `sub_271A90` rejects points where `(flags & 0x90CF) != 0`.
 - **Correlation Reliability Mask (`0x30`)**: Firmware `sub_6FC676` gates point reliability on bits 4 and 5 (`flags & 0x30 != 0`).
 - **Defocus Accumulation (`sub_6FC676`)**: Accumulates non-error point count (`num_no_err`) and absolute defocus sum (`sum_df_abs`) across all points passing `0x90CF`. For points additionally passing `0x30`, increments `num_reliable` and checks optical lock-on boundaries:
-  $$\text{min\_optical\_bound} < \Delta d_i \le \text{max\_optical\_bound}$$
+
+  $$
+  \text{min\_optical\_bound} < \Delta d_i \le \text{max\_optical\_bound}
+  $$
 
 ### 2. Mario AFC 5×5 Debounce Matrix (`sub_8E5BF8` / `dword_C747C4`)
 - Continuous AF (`MarioAfcStateMachine`) uses a 5×5 debounce matrix measured in hardware clock ticks to prevent state chattering and hunting:
-  $$\text{Matrix}_{5 \times 5} = \begin{bmatrix}
+
+  $$
+  \text{Matrix}_{5 \times 5} = \begin{bmatrix}
   0 & 0 & 0 & 0 & 0 \\
   0 & 0 & 400{,}000 & 10{,}000{,}000 & 0 \\
   0 & 0 & 0 & 10{,}000{,}000 & 0 \\
   0 & 0 & 0 & 0 & 0 \\
   0 & 0 & 0 & 0 & 0
-  \end{bmatrix}$$
+  \end{bmatrix}
+  $$
+
 - Transitions require target persistence: `current_tick - pending_target_tick >= matrix[curr_slot, next_slot]`.
 - Transitioning from `LOCKED` (Slot 1) to `TRACKING` (Slot 2) requires 400,000 clock ticks (~40 ms at 10 MHz), suppressing focus dropouts from momentary occlusions.
 
 ### 3. Priority Face Arbitration (`sub_272420` & `sub_271C00`)
-- Evaluates up to 8 candidate face slots ($8 \times 60$ bytes).
+- Evaluates up to 8 candidate face slots (8 × 60 bytes).
 - Slots are gated by reliability and point density thresholds:
   1. `reliable_pdaf_count >= min_reliable_thresh` (default 4)
   2. `point_metric << 8 >= reliable_pdaf_count * density_scale`
@@ -76,18 +83,33 @@ The implementation directly models routines identified via RTTI and symbol table
 - Detected eyes are validated against an active tracking centroid $(t_x, t_y)$.
 - Scale is derived from inter-ocular distance $D_{\text{eye}} = \sqrt{\Delta x^2 + \Delta y^2}$ with $s = 2 \times D_{\text{eye}}$ (`sub_278778`).
 - Acceptance radius $R(s)$ is computed via piecewise linear interpolation:
-  $$R(s) = \left\lfloor \frac{1}{16} \cdot \left( v_5 v_4 + (s - v_4) \frac{v_6 v_3 - v_5 v_4}{v_3 - v_4} \right) \right\rfloor$$
+
+  $$
+  R(s) = \left\lfloor \frac{1}{16} \cdot \left( v_5 v_4 + (s - v_4) \frac{v_6 v_3 - v_5 v_4}{v_3 - v_4} \right) \right\rfloor
+  $$
+
   where $v_4 = 64$, $v_3 = 256$, $v_5 = 8$, $v_6 = 12$.
 - Candidate eyes are rejected as outliers unless:
-  $$(x_{\text{eye}} - t_x)^2 + (y_{\text{eye}} - t_y)^2 \le R(s)^2$$
+
+  $$
+  (x_{\text{eye}} - t_x)^2 + (y_{\text{eye}} - t_y)^2 \le R(s)^2
+  $$
 
 ### 5. STAPLE Tracking & Hardware Boundaries (`sub_705BC6` & `sub_26E8D0`)
 - **Hardware Boundary**: In the physical camera, correlation filtering, feature extraction, and histogram updates run on dedicated hardware (Scene Analysis IP / FRC2 coprocessor via `ddl_saCalcStart` in `sub_26E8D0`).
 - **Python Emulation**: [`staple_tracker.py`](staple_tracker.py) models this behavior using an academic STAPLE formulation (Bertinetto et al., CVPR 2016) in NumPy (2D FFT correlation filter + 3D color histogram).
 - **Reversed Firmware Logic**:
-  * Q12 displacement coordinate integration: $x \leftarrow x + \frac{dx \ll 12}{\text{scale}}$
+  * Q12 displacement coordinate integration:
+
+    $$
+    x \leftarrow x + \frac{dx \ll 12}{\text{scale}}
+    $$
+
   * 20-pixel border check: target is flagged lost (`error_code = 3`) if any boundary violates the 20-pixel margin:
-    $$x < 20 \quad\lor\quad y < 20 \quad\lor\quad x + w + 20 > W \quad\lor\quad y + h + 20 > H$$
+
+    $$
+    x < 20 \quad\lor\quad y < 20 \quad\lor\quad x + w + 20 > W \quad\lor\quad y + h + 20 > H
+    $$
 
 ### 6. Movie Contrast AF State Machine (`sub_8A5122` & `sub_8A520C`)
 - Dispatches dual-loop transitions between `CStateWob` (micro-wobble perturbation) and `CStateYama` (hill-climbing peak search).
@@ -96,7 +118,7 @@ The implementation directly models routines identified via RTTI and symbol table
 
 ## 3. Python Simulation Architecture
 
-```
+```text
 +-----------------------------------------------------------------------------------+
 |                   REVERSED SONY BIONZ XR LOGIC (PYTHON MODEL)                     |
 +-----------------------------------------------------------------------------------+
@@ -169,19 +191,19 @@ OK
 > **Data Environment**: The test suites and demo operate on **synthetic and mocked data** (`struct.pack`, synthetic `PDAFPoint`, synthetic NumPy arrays). They do not run on physical camera hardware or captured raw sensor dumps.
 
 The test suites verify:
-1. **Disassembly Arithmetic & Parity (`tests/test_exact_sony_algos.py`)**:
+1. **Disassembly Arithmetic & Parity ([tests/test_exact_sony_algos.py](tests/test_exact_sony_algos.py))**:
    - 20-byte record decoding and bitwise shift matching `sub_2718A4`.
    - Accumulator logic matching `sub_6FC676` error bitmask `0x90CF` and correlation flag `0x30`.
    - Debounce matrix thresholds matching `sub_8E5BF8` (`dword_C747C4`).
    - Piecewise linear radius and outlier rejection matching `sub_278858` and `sub_709FD6`.
    - 8-slot min-defocus face selection matching `sub_272420`.
    - Q12 fixed-point coordinate integration and 20px border checks matching `sub_705BC6`.
-2. **Boundary & Stress Tests (`tests/test_adversarial_edge_cases.py`)**:
+2. **Boundary & Stress Tests ([tests/test_adversarial_edge_cases.py](tests/test_adversarial_edge_cases.py))**:
    - Individual bit-level rejection for all 8 bits in `0x90CF`.
    - Strict lower bound (`*v10 < df`) and inclusive upper bound (`df <= *v9`) tests.
    - Debounce tick wraparound, jitter, and force-bypass execution.
    - Four-edge border margin breach behavior.
-3. **Subsystem Models (`tests/test_af_tracker.py`)**:
+3. **Subsystem Models ([tests/test_af_tracker.py](tests/test_af_tracker.py))**:
    - Focus area geometries (Wide, Zone, Spot S/M/L) and Hann windowing.
 
 ### Running the Pipeline Demo
@@ -208,5 +230,5 @@ This project is an independent, non-commercial academic research initiative cond
 This repository does not redistribute Sony proprietary binary firmware images (`BODYDATA.dat`, `cpapp-b.bin`, `cpapp-b.elf`), decrypter keys, or full disassembled binaries. Any reference to memory addresses or disassembled fragments is provided strictly for academic verification, commentary, and citation.
 
 ### Code License
-The original Python source code in this package is licensed under the [MIT License](../LICENSE). The license applies solely to the author's original Python code and documentation, and explicitly excludes any third-party trademarks, proprietary hardware microcode, or patents.
+The original Python source code in this package is licensed under the [MIT License](LICENSE) (or [root LICENSE](../LICENSE)). The license applies solely to the author's original Python code and documentation, and explicitly excludes any third-party trademarks, proprietary hardware microcode, or patents.
 
